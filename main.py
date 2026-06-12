@@ -8,6 +8,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from dotenv import load_dotenv
 import requests
 import sqlite3
+import base64
 
 load_dotenv()
 
@@ -65,7 +66,6 @@ def add_subscriber(user_id, username, full_name, plan, days):
 
 # ============ PAYMONGO ============
 def create_payment_link(amount, description, user_id, plan):
-    import base64
     secret = base64.b64encode(f"{PAYMONGO_SECRET_KEY}:".encode()).decode()
     url = "https://api.paymongo.com/v1/links"
     headers = {
@@ -147,7 +147,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute('''INSERT OR REPLACE INTO payments 
                         (payment_id, user_id, amount, plan, status, created_at)
                         VALUES (?, ?, ?, ?, ?, ?)''',
-                      (payment_id, user.id, amount, plan_name, "pending", datetime.now().isoformat()))
+                      (payment_id, user.id, amount, plan_name, "pending",
+                       datetime.now().isoformat()))
             conn.commit()
             conn.close()
 
@@ -167,7 +168,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.error(f"Payment error: {e}")
-            await query.edit_message_text("❌ Error creating payment. Please try again.")
+            await query.edit_message_text(
+                "❌ Error creating payment. Please try again."
+            )
 
     elif query.data == "my_status":
         subscriber = get_subscriber(user.id)
@@ -182,7 +185,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
         else:
-            keyboard = [[InlineKeyboardButton("📋 View Plans", callback_data="view_plans")]]
+            keyboard = [
+                [InlineKeyboardButton("📋 View Plans", callback_data="view_plans")]
+            ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
                 "❌ *No Active Subscription*\n\n"
@@ -253,20 +258,43 @@ async def paymongo_webhook(request: Request):
                 "lifetime": 36500
             }
             days = plan_days.get(plan, 30)
+
+            # Save to database
             add_subscriber(user_id, "", "", plan, days)
 
+            # Generate unique invite link
             try:
-                await bot_app.bot.unban_chat_member(CHANNEL_ID, user_id)
+                invite_link = await bot_app.bot.create_chat_invite_link(
+                    chat_id=CHANNEL_ID,
+                    member_limit=1,
+                    expire_date=datetime.now() + timedelta(days=1)
+                )
+                channel_link = invite_link.invite_link
             except Exception as e:
                 logger.error(f"Channel error: {e}")
+                channel_link = CHANNEL_INVITE_LINK
 
+            # Notify user
             await bot_app.bot.send_message(
                 user_id,
                 f"✅ *Payment Confirmed!*\n\n"
                 f"Welcome to ChannelGuard PH! 🎉\n\n"
-                f"Click here to join the channel:\n{CHANNEL_INVITE_LINK}",
+                f"Click here to join the private channel:\n{channel_link}\n\n"
+                f"⚠️ This invite link expires in 24 hours!\n"
+                f"📅 Your subscription: {plan.capitalize()} ({days} days)",
                 parse_mode="Markdown"
             )
+
+            # Notify admin
+            await bot_app.bot.send_message(
+                ADMIN_ID,
+                f"💰 *New Subscriber!*\n\n"
+                f"User ID: {user_id}\n"
+                f"Plan: {plan.capitalize()}\n"
+                f"Days: {days}",
+                parse_mode="Markdown"
+            )
+
     except Exception as e:
         logger.error(f"Webhook error: {e}")
     return {"ok": True}
