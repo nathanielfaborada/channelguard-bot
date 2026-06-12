@@ -1,6 +1,7 @@
 import os
 import logging
 from datetime import datetime, timedelta
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -8,7 +9,6 @@ from dotenv import load_dotenv
 import requests
 import sqlite3
 
-# Load environment variables
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -16,16 +16,10 @@ CHANNEL_ID = os.getenv("CHANNEL_ID")
 PAYMONGO_SECRET_KEY = os.getenv("PAYMONGO_SECRET_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+CHANNEL_INVITE_LINK = os.getenv("CHANNEL_INVITE_LINK")
 
-# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# FastAPI app
-app = FastAPI()
-
-# Telegram bot application
-bot_app = Application.builder().token(BOT_TOKEN).build()
 
 # ============ DATABASE ============
 def init_db():
@@ -50,7 +44,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-# ============ HELPERS ============
 def get_subscriber(user_id):
     conn = sqlite3.connect("subscribers.db")
     c = conn.cursor()
@@ -72,16 +65,18 @@ def add_subscriber(user_id, username, full_name, plan, days):
 
 # ============ PAYMONGO ============
 def create_payment_link(amount, description, user_id, plan):
+    import base64
+    secret = base64.b64encode(f"{PAYMONGO_SECRET_KEY}:".encode()).decode()
     url = "https://api.paymongo.com/v1/links"
     headers = {
         "accept": "application/json",
         "content-type": "application/json",
-        "authorization": f"Basic {PAYMONGO_SECRET_KEY}"
+        "authorization": f"Basic {secret}"
     }
     payload = {
         "data": {
             "attributes": {
-                "amount": amount * 100,  # Convert to centavos
+                "amount": amount * 100,
                 "description": description,
                 "remarks": f"{user_id}|{plan}"
             }
@@ -91,7 +86,7 @@ def create_payment_link(amount, description, user_id, plan):
     data = response.json()
     return data["data"]["attributes"]["checkout_url"], data["data"]["id"]
 
-# ============ BOT COMMANDS ============
+# ============ BOT HANDLERS ============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     keyboard = [
@@ -147,8 +142,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user.id,
                 plan_name
             )
-
-            # Save pending payment
             conn = sqlite3.connect("subscribers.db")
             c = conn.cursor()
             c.execute('''INSERT OR REPLACE INTO payments 
@@ -167,14 +160,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"💳 *Payment for {plan_name.capitalize()} Plan*\n\n"
                 f"Amount: ₱{amount}\n"
                 f"Duration: {days} days\n\n"
-                f"Click the button below to proceed with payment via GCash, Maya, or Credit Card:\n\n"
-                f"⚠️ After payment, access will be granted automatically!",
+                f"Click below to pay via GCash, Maya, or Credit Card:\n\n"
+                f"⚠️ Access will be granted automatically after payment!",
                 reply_markup=reply_markup,
                 parse_mode="Markdown"
             )
         except Exception as e:
             logger.error(f"Payment error: {e}")
-            await query.edit_message_text("❌ Error creating payment. Please try again or contact support.")
+            await query.edit_message_text("❌ Error creating payment. Please try again.")
 
     elif query.data == "my_status":
         subscriber = get_subscriber(user.id)
@@ -214,7 +207,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-# ============ WEBHOOK ROUTES ============
+# ============ BUILD BOT APP ============
+def build_bot_app():
+    application = Application.builder().token(BOT_TOKEN).updater(None).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    return application
+
+bot_app = build_bot_app()
+
+# ============ FASTAPI ============
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    await bot_app.initialize()
+    await bot_app.bot.set_webhook(f"{WEBHOOK_URL}/webhook/telegram")
+    logger.info("Bot started!")
+    yield
+    await bot_app.shutdown()
+
+app = FastAPI(lifespan=lifespan)
+
 @app.post("/webhook/telegram")
 async def telegram_webhook(request: Request):
     data = await request.json()
@@ -225,50 +238,39 @@ async def telegram_webhook(request: Request):
 @app.post("/webhook/paymongo")
 async def paymongo_webhook(request: Request):
     data = await request.json()
-    event_type = data["data"]["attributes"]["type"]
+    try:
+        event_type = data["data"]["attributes"]["type"]
+        if event_type == "link.payment.paid":
+            payment_data = data["data"]["attributes"]["data"]
+            remarks = payment_data["attributes"]["remarks"]
+            user_id, plan = remarks.split("|")
+            user_id = int(user_id)
 
-    if event_type == "link.payment.paid":
-        payment_data = data["data"]["attributes"]["data"]
-        remarks = payment_data["attributes"]["remarks"]
-        user_id, plan = remarks.split("|")
-        user_id = int(user_id)
+            plan_days = {
+                "weekly": 7,
+                "monthly": 30,
+                "quarterly": 90,
+                "lifetime": 36500
+            }
+            days = plan_days.get(plan, 30)
+            add_subscriber(user_id, "", "", plan, days)
 
-        plan_days = {
-            "weekly": 7,
-            "monthly": 30,
-            "quarterly": 90,
-            "lifetime": 36500
-        }
-        days = plan_days.get(plan, 30)
+            try:
+                await bot_app.bot.unban_chat_member(CHANNEL_ID, user_id)
+            except Exception as e:
+                logger.error(f"Channel error: {e}")
 
-        # Add to database
-        add_subscriber(user_id, "", "", plan, days)
-
-        # Add to channel
-        try:
-            await bot_app.bot.approve_chat_join_request(CHANNEL_ID, user_id)
-        except:
-            await bot_app.bot.unban_chat_member(CHANNEL_ID, user_id)
-
-        # Notify user
-        await bot_app.bot.send_message(
-            user_id,
-            f"✅ *Payment Confirmed!*\n\n"
-            f"Welcome to ChannelGuard PH! 🎉\n\n"
-            f"You now have access to the private channel!\n"
-            f"Click here to join: {os.getenv('CHANNEL_INVITE_LINK', 'Check your channel list')}",
-            parse_mode="Markdown"
-        )
-
+            await bot_app.bot.send_message(
+                user_id,
+                f"✅ *Payment Confirmed!*\n\n"
+                f"Welcome to ChannelGuard PH! 🎉\n\n"
+                f"Click here to join the channel:\n{CHANNEL_INVITE_LINK}",
+                parse_mode="Markdown"
+            )
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
     return {"ok": True}
 
-@app.on_event("startup")
-async def startup():
-    init_db()
-    await bot_app.initialize()
-    await bot_app.bot.set_webhook(f"{WEBHOOK_URL}/webhook/telegram")
-    logger.info("Bot started!")
-
-@app.on_event("shutdown")
-async def shutdown():
-    await bot_app.shutdown()
+@app.get("/")
+async def root():
+    return {"status": "ChannelGuard Bot is running!"}
