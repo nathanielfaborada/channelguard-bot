@@ -25,7 +25,12 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 # Telegram bot application
-bot_app = Application.builder().token(BOT_TOKEN).build()
+bot_app = (
+    Application.builder()
+    .token(BOT_TOKEN)
+    .updater(None)
+    .build()
+)
 
 # ============ DATABASE ============
 def init_db():
