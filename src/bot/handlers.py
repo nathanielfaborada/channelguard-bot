@@ -46,7 +46,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_plans(query):
     keyboard = [
-        [InlineKeyboardButton("Weekly - PHP 99", callback_data="plan_weekly_99_7")],
+        [InlineKeyboardButton("Weekly - PHP 10", callback_data="plan_weekly_10_7")],
         [InlineKeyboardButton("Monthly - PHP 299", callback_data="plan_monthly_299_30")],
         [InlineKeyboardButton("Quarterly - PHP 799", callback_data="plan_quarterly_799_90")],
         [InlineKeyboardButton("Lifetime - PHP 1999", callback_data="plan_lifetime_1999_36500")],
@@ -56,7 +56,7 @@ async def show_plans(query):
 
     await query.edit_message_text(
         "*Choose Your Plan:*\n\n"
-        "Weekly - PHP 99 (7 days)\n"
+        "Weekly - PHP 10 (7 days)\n"
         "Monthly - PHP 299 (30 days)\n"
         "Quarterly - PHP 799 (90 days)\n"
         "Lifetime - PHP 1,999 (Forever)\n\n"
